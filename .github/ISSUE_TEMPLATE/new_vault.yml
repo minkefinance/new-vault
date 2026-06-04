@@ -1,4 +1,4 @@
-name: 📋 New Vault Application
+name: 📋 New Vault
 description: Submit a new application for a new-vault
 title: "[Vault Application]: <Project Name>"
 body:
@@ -8,20 +8,11 @@ body:
         Thank you for submitting a new vault application. Please fill out all required fields below. Incomplete submissions will be automatically closed.
 
   - type: input
-    id: contract_address
+    id: contract_link
     attributes:
-      label: 1. DFIOracle Contract Address
-      description: Provide the deployed and verified smart contract address.
-      placeholder: "e.g., 0x1234567890abcdef..."
-    validations:
-      required: true
-
-  - type: input
-    id: explorer_link
-    attributes:
-      label: Block Explorer Link
-      description: Link to the verified contract on Etherscan, Basescan, etc.
-      placeholder: "https://etherscan.io..."
+      label: 1. DFIOracle Contract Link
+      description: Provide the full block explorer link to the verified DFIOracle contract (e.g., Etherscan, Basescan).
+      placeholder: "e.g., https://etherscan.io..."
     validations:
       required: true
 
@@ -43,7 +34,7 @@ body:
     attributes:
       label: Submission Checklist
       options:
-        - label: I confirm the DFIOracle contract address is accurate and publicly verified.
+        - label: I confirm the DFIOracle contract link is accurate and publicly verified.
           required: true
         - label: I have fully described the token emission rules above.
           required: true
