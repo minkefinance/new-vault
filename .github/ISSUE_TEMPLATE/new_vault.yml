@@ -17,7 +17,7 @@ body:
       required: true
 
   - type: textarea
-    id: emission_rules
+    id: rules
     attributes:
       label: 2. DFIOracle Description & Token Emission Rules
       description: Detail how tokens are released. Include the release schedule, distribution mechanics, and any halving/decay mechanisms.
