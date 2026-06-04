@@ -1,7 +1,6 @@
 name: 📋 New Vault Application
 description: Submit a new application for a new-vault
 title: "[Vault Application]: <Project Name>"
-labels: ["new-vault", "triage"]
 body:
   - type: markdown
     attributes:
