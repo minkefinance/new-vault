@@ -1,0 +1,50 @@
+name: 🐕 Issue Watchdog
+
+on:
+  issues:
+    types: [opened, edited] # 当 Issue 被创建或修改时触发
+
+jobs:
+  validate-submission:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write # 必须赋予脚本修改 Issue 和留言的权限
+    steps:
+      - name: Check Content Validity
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const body = issue.body || "";
+
+            // 1. 验证是否包含合法的 DFIOracle 合约链接 (检查 http:// 或 https://)
+            const hasValidLink = /https?:\/\/[^\s]+/.test(body);
+
+            // 2. 验证用户是否删除了占位符或留空 (检查是否修改了默认模版中的关键部分)
+            // 如果用户没有填写 Project Overview 或 Token Emission Schedule，或者内容太短（少于20字），视为无效
+            const hasEmissionRules = body.includes("Token Emission Schedule:") && body.length > 300; 
+
+            // 如果两个条件有任意一个不满足，触发惩罚机制
+            if (!hasValidLink || !hasEmissionRules) {
+              
+              // 自动发表回复通知用户
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `⚠️ **Invalid Submission Detected** \n\n@${issue.user.login}, your issue has been automatically closed because it does not follow the required template.\n\n**Reasons could be:**\n1. Missing a valid **DFIOracle Contract Link** (must be a full URL starting with \`https://\`).\n2. Missing or incomplete **Token Emission Rules**.\n\nPlease review the requirements in the [README](https://github.com{context.repo.owner}/${context.repo.repo}#readme) and open a new issue with complete information.`
+              });
+
+              // 自动关闭该 Issue
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+                state_reason: 'not_planned' // 标记为未按计划进行
+              });
+
+              console.log(`Watchdog: Closed Issue #${issue.number} due to invalid template compliance.`);
+            } else {
+              console.log(`Watchdog: Issue #${issue.number} passed validation.`);
+            }
