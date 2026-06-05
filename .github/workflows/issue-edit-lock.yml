@@ -1,0 +1,103 @@
+name: Prevent Approved Issue Tampering
+
+on:
+  issues:
+    types: [edited]
+
+jobs:
+  prevent-tampering:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check tags and user permission
+        id: check_auth
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const labels = issue.labels.map(l => l.name);
+            const isApproved = labels.includes('approved');
+            
+            if (!isApproved) return;
+
+            const sender = context.payload.sender.login;
+            const res = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: sender
+            });
+            
+            const permission = res.data.permission;
+            if (permission === 'admin' || permission === 'maintainer') {
+              core.setOutput('should_restore', 'false');
+            } else {
+              core.setOutput('should_restore', 'true');
+            }
+
+      - name: Fetch baseline and restore issue
+        if: steps.check_auth.outputs.should_restore == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // 1. Fetch the timeline of the issue to find the 'labeled' event for 'approved'
+            const timeline = await github.paginate(github.rest.issues.listEventsForTimeline, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            // Find the latest time the 'approved' label was added
+            const labelEvent = timeline
+              .reverse()
+              .find(e => e.event === 'labeled' && e.label && e.label.name === 'approved');
+
+            if (!labelEvent) return;
+            const lockTimestamp = new Date(labelEvent.created_at).getTime();
+
+            // 2. Filter all edits that happened BEFORE or AT the lock timestamp
+            const editEvents = timeline
+              .filter(e => e.event === 'edited' && new Date(e.created_at).getTime() <= lockTimestamp)
+              .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+            // 3. Determine the baseline content (the state when it was approved)
+            let baselineTitle = context.payload.issue.title;
+            let baselineBody = context.payload.issue.body;
+
+            if (editEvents.length > 0) {
+              // If edited before approval, take the source from the latest allowed edit
+              const latestAllowedEdit = editEvents[0];
+              // Note: GitHub timeline events for 'edited' contain historical snapshots in the object
+              // If full snapshot isn't in standard REST event, we can safely fall back or use the first version
+            }
+
+            // A more bulletproof fallback for baseline: find the version right before the unauthorized edits
+            // We find the first unauthorized edit in chronological order
+            const unauthorizedEdits = timeline
+              .filter(e => e.event === 'edited' && new Date(e.created_at).getTime() > lockTimestamp)
+              .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+            if (unauthorizedEdits.length > 0 && unauthorizedEdits[0].changes) {
+              const firstBadEdit = unauthorizedEdits[0].changes;
+              baselineTitle = firstBadEdit.title ? firstBadEdit.title.from : baselineTitle;
+              baselineBody = firstBadEdit.body ? firstBadEdit.body.from : baselineBody;
+            } else if (context.payload.changes) {
+              // If timeline doesn't catch up in milliseconds, fallback to the immediate previous state
+              baselineTitle = context.payload.changes.title ? context.payload.changes.title.from : baselineTitle;
+              baselineBody = context.payload.changes.body ? context.payload.changes.body.from : baselineBody;
+            }
+
+            // 4. Force overwrite back to baseline
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              title: baselineTitle,
+              body: baselineBody
+            });
+            
+            // 5. Post warning comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `⚠️ @${context.payload.sender.login} This issue has been approved and locked. Your changes have been automatically reverted.`
+            });
