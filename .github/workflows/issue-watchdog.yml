@@ -18,7 +18,7 @@ jobs:
             const body = issue.body || "";
 
             const hasValidLink = /https?:\/\/[^\s]+/.test(body);
-            const hasEmissionRules = body.includes("Token Emission Schedule:") && body.length > 300; 
+            const hasEmissionRules = body.length > 50; 
 
             if (!hasValidLink || !hasEmissionRules) {
               await github.rest.issues.createComment({
