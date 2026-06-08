@@ -9,30 +9,32 @@ concurrency:
   group: lock-approved-issue-${{ github.event.issue.number }}
   cancel-in-progress: false
 
+# Explicitly grant write permissions to the default GITHUB_TOKEN (the bot user)
 permissions:
   issues: write
+  contents: read
 
 jobs:
   undo-and-smart-warn:
     runs-on: ubuntu-latest
-    # Skip if the actor is the bot itself, and ensure the issue contains the 'approved' label
-    if: |
-      github.actor != 'github-actions[bot]' && 
-      contains(github.event.issue.labels.*.name, 'approved')
+    # Skip if the edit was made by the bot itself, preventing infinite loops
+    if: github.actor != 'github-actions[bot]' && contains(github.event.issue.labels.*.name, 'approved') && !contains(github.event.issue.labels.*.name, 'onlive')
 
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Revert modifications and update warning comment
         env:
+          # This token acts as github-actions[bot] with default repository write access
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_URL: ${{ github.event.issue.html_url }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          # Get previous data before the modification
           OLD_TITLE: ${{ github.event.changes.title.from }}
           OLD_BODY: ${{ github.event.changes.body.from }}
-          # Get the user who made the edit
-          ACTOR: ${{ github.actor }}
+          VIOLATOR: ${{ github.actor }}
         run: |
-          # Double check: ensure the issue currently has the 'approved' label
+          # Ensure the issue currently has the 'approved' label
           IS_APPROVED=$(gh issue view "$ISSUE_NUMBER" --json labels --jq '.labels[] | select(.name == "approved") | .name')
           
           if [ -z "$IS_APPROVED" ]; then
@@ -44,34 +46,32 @@ jobs:
 
           # 1. Check and revert title
           if [ ! -z "$OLD_TITLE" ]; then
-            echo "Detected modification to an approved issue title. Reverting..."
+            echo "Bot action: Reverting approved issue title..."
             gh issue edit "$ISSUE_URL" --title "$OLD_TITLE"
             HAS_CHANGES=true
           fi
 
           # 2. Check and revert body
           if [ ! -z "$OLD_BODY" ]; then
-            echo "Detected modification to an approved issue body. Reverting..."
+            echo "Bot action: Reverting approved issue body..."
             gh issue edit "$ISSUE_URL" --body "$OLD_BODY"
             HAS_CHANGES=true
           fi
 
-          # 3. Handle the warning comment intelligently
+          # 3. Handle the warning comment intelligently via Bot
           if [ "$HAS_CHANGES" = true ]; then
             # Search for an existing warning comment using the hidden HTML identifier
             COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments" \
               --jq '.[] | select(.body | contains("<!-- ID: approved-issue-warning -->")) | .id' | head -n 1)
             
             # Define the English warning text with the hidden identifier at the end
-            WARNING_MSG="⚠️ **Security Warning**: This issue has been marked as **approved** and its core content is locked by the system.\n\nThe latest unauthorized modification attempt by @$ACTOR has been automatically reverted.\n\n*Note: Please do not modify locked issues. Repeated attempts will only update this single warning.* \n<!-- ID: approved-issue-warning -->"
+            WARNING_MSG="⚠️ **Security Warning**: This issue has been marked as **approved** and its core content is locked by the system.\n\nThe unauthorized modification attempt by @$VIOLATOR has been automatically reverted by the system bot.\n\n*Note: Please do not modify locked issues. Repeated attempts will only update this single warning.* \n<!-- ID: approved-issue-warning -->"
 
             if [ -z "$COMMENT_ID" ]; then
-              # Case A: No previous warning found -> Create a new comment
-              echo "First modification detected. Creating a new warning comment..."
+              echo "Bot action: Creating a new warning comment..."
               gh issue comment "$ISSUE_URL" --body "$WARNING_MSG"
             else
-              # Case B: Warning already exists -> Update the existing comment (No spamming)
-              echo "Existing warning found (ID: $COMMENT_ID). Updating the comment..."
+              echo "Bot action: Updating the existing comment (ID: $COMMENT_ID)..."
               gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$WARNING_MSG"
             fi
           fi
