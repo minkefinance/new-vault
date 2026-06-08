@@ -10,7 +10,7 @@ permissions:
 jobs:
   save-snapshot:
     runs-on: ubuntu-latest
-    if: github.event.label.name == 'approved'
+    if: github.event.label.name == 'approved' || github.event.label.name == 'onlive'
 
     steps:
       - name: Save or Update readable snapshot to comment
