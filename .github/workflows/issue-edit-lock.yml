@@ -1,77 +1,61 @@
-name: Lock Approved Issue Content
+name: Save Approved Snapshot
 
 on:
   issues:
-    types: [edited]
+    types: [labeled]
 
-# Concurrency control: queues workflows by issue number to prevent race conditions
-concurrency:
-  group: lock-approved-issue-${{ github.event.issue.number }}
-  cancel-in-progress: false
-
-# Explicitly grant write permissions to the default GITHUB_TOKEN (the bot user)
 permissions:
   issues: write
-  contents: read
 
 jobs:
-  undo-and-smart-warn:
+  save-snapshot:
     runs-on: ubuntu-latest
-    # Skip if the edit was made by the bot itself, preventing infinite loops
-    if: github.actor != 'github-actions[bot]' && contains(github.event.issue.labels.*.name, 'approved') && !contains(github.event.issue.labels.*.name, 'onlive')
+    if: github.event.label.name == 'approved'
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Revert modifications and update warning comment
+      - name: Save or Update readable snapshot to comment
         env:
-          # This token acts as github-actions[bot] with default repository write access
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_URL: ${{ github.event.issue.html_url }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          OLD_TITLE: ${{ github.event.changes.title.from }}
-          OLD_BODY: ${{ github.event.changes.body.from }}
-          VIOLATOR: ${{ github.actor }}
+          TITLE: ${{ github.event.issue.title }}
+          BODY: ${{ github.event.issue.body }}
         run: |
-          # Ensure the issue currently has the 'approved' label
-          IS_APPROVED=$(gh issue view "$ISSUE_NUMBER" --json labels --jq '.labels[] | select(.name == "approved") | .name')
+          # 1. check exits
+          COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments" \
+            --jq '.[] | select(.body | contains("<!-- ID: approved-content-snapshot -->")) | .id' | head -n 1)
+
+          # 2. gen msg
+          SNAPSHOT_MSG="🔒 **Approved Content Archive**
+          export SNAPSHOT_MSG=$(cat << 'EOF'
+          🔒 **Approved Content Archive**
+
+          This issue has been approved. The content below is archived and locked.
+
+          ---
+
+          ### 📝 Archived Title
+          > $TITLE
+
+          ### 📄 Archived Body
+          ```markdown
+          \$BODY
+          ```
+
+          <!-- ID: approved-content-snapshot -->
+          <!-- MACHINE_READABLE_START
+          TITLE_START:$TITLE:TITLE_END
+          BODY_START:$BODY:BODY_END
+          MACHINE_READABLE_END -->
+          EOF
+          )
           
-          if [ -z "$IS_APPROVED" ]; then
-            echo "This issue is not labeled as 'approved'. Skipping revert."
-            exit 0
-          fi
-
-          HAS_CHANGES=false
-
-          # 1. Check and revert title
-          if [ ! -z "$OLD_TITLE" ]; then
-            echo "Bot action: Reverting approved issue title..."
-            gh issue edit "$ISSUE_URL" --title "$OLD_TITLE"
-            HAS_CHANGES=true
-          fi
-
-          # 2. Check and revert body
-          if [ ! -z "$OLD_BODY" ]; then
-            echo "Bot action: Reverting approved issue body..."
-            gh issue edit "$ISSUE_URL" --body "$OLD_BODY"
-            HAS_CHANGES=true
-          fi
-
-          # 3. Handle the warning comment intelligently via Bot
-          if [ "$HAS_CHANGES" = true ]; then
-            # Search for an existing warning comment using the hidden HTML identifier
-            COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments" \
-              --jq '.[] | select(.body | contains("<!-- ID: approved-issue-warning -->")) | .id' | head -n 1)
-            
-            # Define the English warning text with the hidden identifier at the end
-            WARNING_MSG="⚠️ **Security Warning**: This issue has been marked as **approved** and its core content is locked by the system.\n\nThe unauthorized modification attempt by @$VIOLATOR has been automatically reverted by the system bot.\n\n*Note: Please do not modify locked issues. Repeated attempts will only update this single warning.* \n<!-- ID: approved-issue-warning -->"
-
-            if [ -z "$COMMENT_ID" ]; then
-              echo "Bot action: Creating a new warning comment..."
-              gh issue comment "$ISSUE_URL" --body "$WARNING_MSG"
-            else
-              echo "Bot action: Updating the existing comment (ID: $COMMENT_ID)..."
-              gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$WARNING_MSG"
-            fi
+          SNAPSHOT_MSG=$(echo "$SNAPSHOT_MSG" | perl -pe 's/^\s{10}//')
+          # 3. exec
+          if [ -z "$COMMENT_ID" ]; then
+            echo "Bot action: No existing snapshot found. Creating a new archive comment..."
+            gh issue comment "$ISSUE_URL" --body "$SNAPSHOT_MSG"
+          else
+            echo "Bot action: Existing snapshot found (ID: $COMMENT_ID). Updating the archive with the latest approved version..."
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$SNAPSHOT_MSG"
           fi
