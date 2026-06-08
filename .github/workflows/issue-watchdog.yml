@@ -2,7 +2,7 @@ name: 🐕 Issue Watchdog
 
 on:
   issues:
-    types: [opened, edited]
+    types: [opened]
 
 jobs:
   validate-submission:
