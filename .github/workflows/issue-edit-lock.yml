@@ -1,103 +1,77 @@
-name: Prevent Approved Issue Tampering
+name: Lock Approved Issue Content
 
 on:
   issues:
     types: [edited]
 
+# Concurrency control: queues workflows by issue number to prevent race conditions
+concurrency:
+  group: lock-approved-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+
 jobs:
-  prevent-tampering:
+  undo-and-smart-warn:
     runs-on: ubuntu-latest
+    # Skip if the actor is the bot itself, and ensure the issue contains the 'approved' label
+    if: |
+      github.actor != 'github-actions[bot]' && 
+      contains(github.event.issue.labels.*.name, 'approved')
+
     steps:
-      - name: Check tags and user permission
-        id: check_auth
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const issue = context.payload.issue;
-            const labels = issue.labels.map(l => l.name);
-            const isApproved = labels.includes('approved');
+      - name: Revert modifications and update warning comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          # Get previous data before the modification
+          OLD_TITLE: ${{ github.event.changes.title.from }}
+          OLD_BODY: ${{ github.event.changes.body.from }}
+          # Get the user who made the edit
+          ACTOR: ${{ github.actor }}
+        run: |
+          # Double check: ensure the issue currently has the 'approved' label
+          IS_APPROVED=$(gh issue view "$ISSUE_NUMBER" --json labels --jq '.labels[] | select(.name == "approved") | .name')
+          
+          if [ -z "$IS_APPROVED" ]; then
+            echo "This issue is not labeled as 'approved'. Skipping revert."
+            exit 0
+          fi
+
+          HAS_CHANGES=false
+
+          # 1. Check and revert title
+          if [ ! -z "$OLD_TITLE" ]; then
+            echo "Detected modification to an approved issue title. Reverting..."
+            gh issue edit "$ISSUE_URL" --title "$OLD_TITLE"
+            HAS_CHANGES=true
+          fi
+
+          # 2. Check and revert body
+          if [ ! -z "$OLD_BODY" ]; then
+            echo "Detected modification to an approved issue body. Reverting..."
+            gh issue edit "$ISSUE_URL" --body "$OLD_BODY"
+            HAS_CHANGES=true
+          fi
+
+          # 3. Handle the warning comment intelligently
+          if [ "$HAS_CHANGES" = true ]; then
+            # Search for an existing warning comment using the hidden HTML identifier
+            COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments" \
+              --jq '.[] | select(.body | contains("<!-- ID: approved-issue-warning -->")) | .id' | head -n 1)
             
-            if (!isApproved) return;
+            # Define the English warning text with the hidden identifier at the end
+            WARNING_MSG="⚠️ **Security Warning**: This issue has been marked as **approved** and its core content is locked by the system.\n\nThe latest unauthorized modification attempt by @$ACTOR has been automatically reverted.\n\n*Note: Please do not modify locked issues. Repeated attempts will only update this single warning.* \n<!-- ID: approved-issue-warning -->"
 
-            const sender = context.payload.sender.login;
-            const res = await github.rest.repos.getCollaboratorPermissionLevel({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              username: sender
-            });
-            
-            const permission = res.data.permission;
-            if (permission === 'admin' || permission === 'maintainer') {
-              core.setOutput('should_restore', 'false');
-            } else {
-              core.setOutput('should_restore', 'true');
-            }
-
-      - name: Fetch baseline and restore issue
-        if: steps.check_auth.outputs.should_restore == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // 1. Fetch the timeline of the issue to find the 'labeled' event for 'approved'
-            const timeline = await github.paginate(github.rest.issues.listEventsForTimeline, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            // Find the latest time the 'approved' label was added
-            const labelEvent = timeline
-              .reverse()
-              .find(e => e.event === 'labeled' && e.label && e.label.name === 'approved');
-
-            if (!labelEvent) return;
-            const lockTimestamp = new Date(labelEvent.created_at).getTime();
-
-            // 2. Filter all edits that happened BEFORE or AT the lock timestamp
-            const editEvents = timeline
-              .filter(e => e.event === 'edited' && new Date(e.created_at).getTime() <= lockTimestamp)
-              .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
-            // 3. Determine the baseline content (the state when it was approved)
-            let baselineTitle = context.payload.issue.title;
-            let baselineBody = context.payload.issue.body;
-
-            if (editEvents.length > 0) {
-              // If edited before approval, take the source from the latest allowed edit
-              const latestAllowedEdit = editEvents[0];
-              // Note: GitHub timeline events for 'edited' contain historical snapshots in the object
-              // If full snapshot isn't in standard REST event, we can safely fall back or use the first version
-            }
-
-            // A more bulletproof fallback for baseline: find the version right before the unauthorized edits
-            // We find the first unauthorized edit in chronological order
-            const unauthorizedEdits = timeline
-              .filter(e => e.event === 'edited' && new Date(e.created_at).getTime() > lockTimestamp)
-              .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-
-            if (unauthorizedEdits.length > 0 && unauthorizedEdits[0].changes) {
-              const firstBadEdit = unauthorizedEdits[0].changes;
-              baselineTitle = firstBadEdit.title ? firstBadEdit.title.from : baselineTitle;
-              baselineBody = firstBadEdit.body ? firstBadEdit.body.from : baselineBody;
-            } else if (context.payload.changes) {
-              // If timeline doesn't catch up in milliseconds, fallback to the immediate previous state
-              baselineTitle = context.payload.changes.title ? context.payload.changes.title.from : baselineTitle;
-              baselineBody = context.payload.changes.body ? context.payload.changes.body.from : baselineBody;
-            }
-
-            // 4. Force overwrite back to baseline
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              title: baselineTitle,
-              body: baselineBody
-            });
-            
-            // 5. Post warning comment
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `⚠️ @${context.payload.sender.login} This issue has been approved and locked. Your changes have been automatically reverted.`
-            });
+            if [ -z "$COMMENT_ID" ]; then
+              # Case A: No previous warning found -> Create a new comment
+              echo "First modification detected. Creating a new warning comment..."
+              gh issue comment "$ISSUE_URL" --body "$WARNING_MSG"
+            else
+              # Case B: Warning already exists -> Update the existing comment (No spamming)
+              echo "Existing warning found (ID: $COMMENT_ID). Updating the comment..."
+              gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$COMMENT_ID" -f body="$WARNING_MSG"
+            fi
+          fi
